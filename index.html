@@ -96,39 +96,13 @@ body {
   word-wrap: break-word;
 }
 
-/* Alaosa jätetään pois (kuten toivoit) — pidetään tämä kommentoituna varmuuden vuoksi
-.bottom-container {
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-}
-.bottom-container .calendar-box iframe {
-  height: 250px;
-  height: 350px;
-  width: 100%;
-  border: none;
-}
-*/
-
-@media (max-width: 1024px) {
-  .top-container { flex-direction: column; }
-  .events-list { max-height: 400px; }
-  /* .bottom-container .calendar-box iframe { height: 200px; } */
-}
-
-@media (max-width: 600px) {
-  .header { font-size: 1.4em; padding: 10px; }
-  .events-list { max-height: 300px; }
-  /* .bottom-container .calendar-box iframe { height: 150px; } */
-}
+/* Alaosa ei käytössä */
 </style>
 </head>
 <body>
 
 <div class="container">
-
   <div class="top-container">
-
     <div class="calendar-box">
       <div class="header miehistö">Miehistö</div>
       <div class="events-list" id="miehisto-events"></div>
@@ -138,25 +112,17 @@ body {
       <div class="header nuoriso">Nuoriso-osasto</div>
       <div class="events-list" id="nuoriso-events"></div>
     </div>
-
   </div>
-
-  <!-- Alaosan kalenterit poistettu käytöstä toiveesi mukaan
-  <div class="bottom-container"> ... </div>
-  -->
-
 </div>
 
-<!-- ical.js parsii suoraan iCal/ICS-syötteen selaimessa -->
+<!-- ical parser -->
 <script src="https://cdn.jsdelivr.net/npm/ical.js@1.4.0/build/ical.min.js"></script>
 <script>
-/* --- ASETUKSET (suora iCal Nimenhuudosta) --- */
-const MIEHISTO_ICS_URL = 'https://metsakylanvpk.nimenhuuto.com/calendar/ical';
-const NUORISO_ICS_URL  = 'https://metsakylanvpknuoriso-osasto.nimenhuuto.com/calendar/ical';
+/* --- ASETUKSET: iCal-osoitteet --- */
+const MIEHISTO_ICS = 'https://metsakylanvpk.nimenhuuto.com/calendar/ical';
+const NUORISO_ICS  = 'https://metsakylanvpknuoriso-osasto.nimenhuuto.com/calendar/ical';
 
-/* --- APUFUNKTIOT (pidetään samana yleisilmeen säilyttämiseksi) --- */
-
-// Poistaa kaiken ennen viimeistä erottajaa (– tai :)
+/* --- APUFUNKTIOT (sama look&feel) --- */
 function cleanTitle(title) {
   if (!title) return '';
   const match = title.match(/(?:–|:)\s*(.+)$/);
@@ -167,7 +133,6 @@ function cleanTitle(title) {
     .trim();
 }
 
-// Nimenhuudon tapahtumatyypit → värit (”sinnepäin” sävyt)
 function getDateColor(originalSummary) {
   const t = (originalSummary || '').toLowerCase();
   if (t.includes('auto')) return '#fc832f';
@@ -178,10 +143,9 @@ function getDateColor(originalSummary) {
   if (t.includes('esittely') || t.includes('alkusammutus') || t.includes('tapahtuma')) return '#7ab638';
   if (t.includes('jokkis') || t.includes('ralli') || t.includes('drift')) return '#7ab638';
   if (t.includes('juhla')) return '#7ab638';
-  return '#2178a1'; // oletus (sininen)
+  return '#2178a1';
 }
 
-// Poista linkit lisätiedoista
 function stripLinks(html) {
   if (!html) return '';
   const div = document.createElement('div');
@@ -192,13 +156,10 @@ function stripLinks(html) {
   return text;
 }
 
-// Päivämäärien muotoilu (sama päivä → kellonajat; useampi päivä → molemmat päivät ja ajat)
 function formatEventDate(startDate, endDate, allDay=false) {
-  const start = new Date(startDate.getTime());
-  const end   = new Date(endDate.getTime());
-
+  const start = new Date(startDate);
+  const end   = new Date(endDate);
   const sameDay = start.toDateString() === end.toDateString();
-
   if (allDay) {
     if (sameDay) return start.toLocaleDateString('fi-FI');
     return `${start.toLocaleDateString('fi-FI')} – ${end.toLocaleDateString('fi-FI')}`;
@@ -209,21 +170,50 @@ function formatEventDate(startDate, endDate, allDay=false) {
   }
 }
 
-/* --- iCal-haku ja parsi --- */
-async function fetchICS(url) {
-  const res = await fetch(url, { cache: 'no-cache' });
-  if (!res.ok) throw new Error('ICS fetch failed: ' + res.status);
-  const text = await res.text();
-  const jcal = ICAL.parse(text);
+/* --- ICS nouto varareiteillä --- */
+async function fetchICSWithFallbacks(srcUrl) {
+  const candidates = [
+    { name: 'direct', url: srcUrl }, // suora (jos CORS sallii)
+    { name: 'allorigins-raw', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(srcUrl) },
+    { name: 'allorigins-get', url: 'https://api.allorigins.win/get?url=' + encodeURIComponent(srcUrl), jsonWrap: true },
+    // r.jina.ai lukee HTTP:ta; kokeillaan http-versiota jos palvelin ohjaa https:ään
+    { name: 'jina-reader', url: 'https://r.jina.ai/http://'+ srcUrl.replace(/^https?:\/\//,'') }
+  ];
+
+  let lastErr = null;
+  for (const c of candidates) {
+    try {
+      const res = await fetch(c.url, { cache: 'no-cache' });
+      if (!res.ok) throw new Error(c.name + ' status ' + res.status);
+
+      if (c.jsonWrap) {
+        const j = await res.json();
+        if (!j || typeof j.contents !== 'string') throw new Error(c.name + ' no contents');
+        return j.contents; // palautetaan ICS-teksti
+      } else {
+        const text = await res.text();
+        // pika-validointi: pitää sisältää ICS header
+        if (!/BEGIN:VCALENDAR/i.test(text)) throw new Error(c.name + ' not ICS');
+        return text;
+      }
+    } catch (e) {
+      lastErr = e;
+      // console.warn('fallback failed', c.name, e);
+      continue;
+    }
+  }
+  throw lastErr || new Error('All ICS fallbacks failed');
+}
+
+async function loadICS(url) {
+  const icsText = await fetchICSWithFallbacks(url);
+  const jcal = ICAL.parse(icsText);
   const comp = new ICAL.Component(jcal);
   const events = comp.getAllSubcomponents('vevent').map(ve => new ICAL.Event(ve));
 
   const now = new Date();
-
-  // Muutetaan ical.js Event -> yksinkertainen olio renderöintiä varten
-  // Huom: iCal all-day -tapahtumissa end on usein eksklusiivinen; ical.js normalisoi oikein.
-  const mapped = events
-    .filter(ev => ev.endDate && ev.endDate.toJSDate() > now) // vain tulevat/käynnissä olevat
+  return events
+    .filter(ev => ev.endDate && ev.endDate.toJSDate() > now)
     .map(ev => {
       const start = ev.startDate.toJSDate();
       const end   = ev.endDate.toJSDate();
@@ -237,11 +227,9 @@ async function fetchICS(url) {
       };
     })
     .sort((a,b) => a.startDate - b.startDate);
-
-  return mapped;
 }
 
-/* --- RENDERÖINTI (pidetään samana ilmeenä) --- */
+/* --- RENDER --- */
 function renderList(containerId, items) {
   const container = document.getElementById(containerId);
   container.innerHTML = '';
@@ -287,20 +275,20 @@ function renderList(containerId, items) {
 async function loadAll() {
   try {
     const [mie, nuo] = await Promise.all([
-      fetchICS(MIEHISTO_ICS_URL),
-      fetchICS(NUORISO_ICS_URL)
+      loadICS(MIEHISTO_ICS),
+      loadICS(NUORISO_ICS)
     ]);
     renderList('miehisto-events', mie);
     renderList('nuoriso-events',  nuo);
   } catch (e) {
-    console.error(e);
+    console.error('ICS-haku epäonnistui:', e);
     document.getElementById('miehisto-events').innerHTML = '<div class="event-card"><div class="event-title">Tietojen haku epäonnistui</div></div>';
     document.getElementById('nuoriso-events').innerHTML  = '<div class="event-card"><div class="event-title">Tietojen haku epäonnistui</div></div>';
   }
 }
 
 loadAll();
-// Testiä varten useammin: 5 min välein. Voit palauttaa 59 min, kun olet tyytyväinen.
+// Päivitä 5 min välein (voit muuttaa)
 setInterval(loadAll, 5 * 60 * 1000);
 </script>
 
